@@ -33,6 +33,13 @@ const locationValue = $("locationValue");
 const traceEl = $("trace");
 const toastEl = $("toast");
 
+const minimizePathsInput = $("minimizePathsInput");
+const minimizeBtn = $("minimizeBtn");
+const minimizeCount = $("minimizeCount");
+const minimizeModal = $("minimizeModal");
+const minimizeModalClose = $("minimizeModalClose");
+const minimizeModalBody = $("minimizeModalBody");
+
 let lastResponse = null;
 let examples = [];
 let errorLineSet = new Set();
@@ -594,6 +601,293 @@ document.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
     e.preventDefault();
     runDebug();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 规则精简
+// ---------------------------------------------------------------------------
+
+// 前端先做一轮轻校验，返回错误信息（null 表示通过）
+function validateMinimizePaths(lines) {
+  if (!lines.length) {
+    return "请输入至少一条待保障的请求路径（每行一条）";
+  }
+  if (lines.length > 50) {
+    return `待保障路径最多 50 条（当前 ${lines.length} 条），请精简后重试`;
+  }
+  for (let i = 0; i < lines.length; i += 1) {
+    const p = lines[i];
+    if (!p.startsWith("/")) {
+      return `第 ${i + 1} 条请求路径必须以 / 开头：${p}`;
+    }
+    if (/\s/.test(p)) {
+      return `第 ${i + 1} 条请求路径不能包含空白字符：${p}`;
+    }
+    if (p.length > 4096) {
+      return `第 ${i + 1} 条请求路径过长（超过 4096 个字符）`;
+    }
+  }
+  return null;
+}
+
+function resultSignature(result) {
+  return [
+    result.status,
+    result.final_url,
+    result.location,
+    result.finish_reason,
+  ];
+}
+
+function renderMinimizePathCard(item) {
+  const card = el("div", `min-path-card ${item.unchanged ? "same" : "diff"}`);
+
+  const head = el("div", "min-path-head");
+  head.appendChild(el("code", "min-path-name", item.path));
+  head.appendChild(
+    el(
+      "span",
+      `min-path-badge ${item.unchanged ? "ok" : "bad"}`,
+      item.unchanged ? "✓ 结果一致" : "✗ 结果变化"
+    )
+  );
+  card.appendChild(head);
+
+  const grid = el("div", "min-path-grid");
+  const fields = [
+    ["最终状态码", (r) => `HTTP ${r.status}`],
+    ["最终 URL", (r) => r.final_url || "—"],
+    ["Location", (r) => r.location || "—"],
+    ["结束原因", (r) => REASON_TEXT[r.finish_reason] || r.finish_reason],
+  ];
+  fields.forEach(([label, pick]) => {
+    const beforeVal = pick(item.before);
+    const afterVal = pick(item.after);
+    const equal = beforeVal === afterVal;
+    const cell = el("div", "min-path-field");
+    cell.appendChild(el("span", "min-path-label", label));
+    const vals = el("div", `min-path-vals ${equal ? "" : "changed"}`);
+    const before = el("div", "min-path-val");
+    before.appendChild(el("span", "min-path-tag", "前"));
+    before.appendChild(el("code", "", beforeVal));
+    const after = el("div", "min-path-val");
+    after.appendChild(el("span", "min-path-tag", "后"));
+    after.appendChild(el("code", "", afterVal));
+    vals.append(before, after);
+    cell.appendChild(vals);
+    grid.appendChild(cell);
+  });
+  card.appendChild(grid);
+  return card;
+}
+
+function closeMinimizeModal() {
+  minimizeModal.hidden = true;
+  minimizeModalBody.innerHTML = "";
+}
+
+function renderMinimizeResult(data) {
+  minimizeModalBody.innerHTML = "";
+
+  // 概要
+  const summaryRow = el("div", "min-result-summary");
+  const delta = data.original_rule_count - data.minimized_rule_count;
+  summaryRow.appendChild(
+    el(
+      "strong",
+      "",
+      delta > 0
+        ? `删除 ${delta} 条规则（${data.original_rule_count} → ${data.minimized_rule_count} 条）`
+        : "没有可删除的规则：剩余每条规则单独删除都会改变至少一条路径的结果"
+    )
+  );
+  summaryRow.appendChild(
+    el(
+      "span",
+      "muted",
+      `共保障 ${data.paths.length} 条路径 · 试探 ${data.attempts} 次（不追求全局最短）`
+    )
+  );
+  minimizeModalBody.appendChild(summaryRow);
+
+  // 删除的原行号
+  const removedBlock = el("div", "min-block");
+  removedBlock.appendChild(el("div", "min-block-title", "删除的原行号"));
+  const chips = el("div", "min-removed-chips");
+  if (data.removed_lines.length === 0) {
+    chips.appendChild(el("span", "muted", "（无）"));
+  } else {
+    data.removed_lines.forEach((lineNo) => {
+      const chip = el("button", "removed-chip", `第 ${lineNo} 行`);
+      chip.type = "button";
+      chip.title = "点击在编辑器中定位该行";
+      chip.addEventListener("click", () => {
+        closeMinimizeModal();
+        focusEditorLine(lineNo);
+      });
+      chips.appendChild(chip);
+    });
+    const copyLinesBtn = el(
+      "button",
+      "btn btn-secondary btn-tiny",
+      "📋 复制行号列表"
+    );
+    copyLinesBtn.type = "button";
+    copyLinesBtn.addEventListener("click", () => {
+      copyText(data.removed_lines.join(", "), "已复制删除行号列表");
+    });
+    chips.appendChild(copyLinesBtn);
+  }
+  removedBlock.appendChild(chips);
+  minimizeModalBody.appendChild(removedBlock);
+
+  // 精简后的规则文本（可复制，不覆盖编辑器）
+  const rulesBlock = el("div", "min-block");
+  const rulesHead = el("div", "min-block-title-row");
+  rulesHead.appendChild(el("div", "min-block-title", "精简后的规则（原文顺序与注释保留）"));
+  const copyRulesBtn = el("button", "btn btn-secondary btn-tiny", "📋 复制规则");
+  copyRulesBtn.type = "button";
+  copyRulesBtn.addEventListener("click", () => {
+    copyText(data.minimized_rules, "已复制精简后的规则文本");
+  });
+  rulesHead.appendChild(copyRulesBtn);
+  rulesBlock.appendChild(rulesHead);
+  const pre = el("pre", "min-rules-view");
+  pre.textContent = data.minimized_rules || "#（无规则，也无注释保留）";
+  rulesBlock.appendChild(pre);
+  minimizeModalBody.appendChild(rulesBlock);
+
+  // 各路径精简前后结果
+  const pathsBlock = el("div", "min-block");
+  pathsBlock.appendChild(
+    el("div", "min-block-title", `各路径精简前后结果（${data.results.length} 条）`)
+  );
+  const list = el("div", "min-path-list");
+  data.results.forEach((item) => list.appendChild(renderMinimizePathCard(item)));
+  pathsBlock.appendChild(list);
+  minimizeModalBody.appendChild(pathsBlock);
+
+  minimizeModal.hidden = false;
+}
+
+// 在规则编辑器中定位某一原行号（选中该行）
+function focusEditorLine(lineNo) {
+  const text = editor.value;
+  let start = 0;
+  for (let i = 1; i < lineNo; i += 1) {
+    const next = text.indexOf("\n", start);
+    if (next === -1) {
+      start = text.length;
+      break;
+    }
+    start = next + 1;
+  }
+  const nl = text.indexOf("\n", start);
+  const end = nl === -1 ? text.length : nl;
+  editor.focus();
+  editor.setSelectionRange(start, Math.max(start, end));
+  const lineHeight = parseFloat(getComputedStyle(editor).lineHeight) || 20;
+  editor.scrollTop = Math.max(0, (lineNo - 1) * lineHeight - 40);
+}
+
+minimizeModalClose.addEventListener("click", closeMinimizeModal);
+minimizeModal.addEventListener("click", (e) => {
+  if (e.target === minimizeModal) closeMinimizeModal();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !minimizeModal.hidden) closeMinimizeModal();
+});
+
+async function runMinimize() {
+  const raw = minimizePathsInput.value;
+  const lines = raw
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+  const message = validateMinimizePaths(lines);
+  if (message) {
+    toast(message, true);
+    minimizePathsInput.focus();
+    return;
+  }
+
+  const maxSteps = parseInt(maxStepsInput.value, 10);
+  if (!Number.isFinite(maxSteps) || maxSteps < 1 || maxSteps > 500) {
+    toast("步数上限需为 1–500 之间的整数", true);
+    maxStepsInput.focus();
+    return;
+  }
+
+  const body = {
+    rules: editor.value,
+    paths: lines,
+    max_steps: maxSteps,
+    follow_redirects: followRedirectsInput.checked,
+  };
+
+  minimizeBtn.disabled = true;
+  minimizeBtn.textContent = "⏳ 精简中…";
+  minimizeCount.textContent = "";
+
+  try {
+    const res = await fetch("/api/minimize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    if (res.status === 422 || res.status === 400) {
+      const payload = await res.json();
+      let msg;
+      if (payload.detail && payload.detail[0]) {
+        msg = payload.detail[0].msg;
+      } else if (typeof payload.detail === "string") {
+        msg = payload.detail;
+      } else {
+        msg = "请求参数不合法";
+      }
+      // pydantic v2 的 ValueError 消息带固定前缀，去掉以便直接展示
+      msg = msg.replace(/^Value error,\s*/, "");
+      toast(msg, true);
+      return;
+    }
+
+    const data = await res.json();
+
+    if (!data.ok) {
+      // 原规则有误：复用错误列表定位，明确报错且不覆盖编辑器
+      renderErrors(data.errors || []);
+      toast(`规则存在 ${data.errors.length} 个语法错误，请先修正再精简`, true);
+      return;
+    }
+
+    errorList.hidden = true;
+    errorLineSet = new Set();
+    editor.classList.remove("has-error-line");
+    renderGutter();
+
+    const delta = data.original_rule_count - data.minimized_rule_count;
+    minimizeCount.textContent =
+      delta > 0 ? `可删 ${delta} 条` : "已是最小保留集（贪心）";
+    renderMinimizeResult(data);
+    toast(delta > 0 ? `精简完成，删除 ${delta} 条规则` : "没有可安全删除的规则");
+  } catch (err) {
+    toast("网络错误，服务不可达", true);
+  } finally {
+    minimizeBtn.disabled = false;
+    minimizeBtn.textContent = "✂️ 开始精简";
+  }
+}
+
+minimizeBtn.addEventListener("click", runMinimize);
+
+// Ctrl/Cmd + Shift + Enter 快捷精简
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === "Enter") {
+    e.preventDefault();
+    runMinimize();
   }
 });
 

@@ -66,6 +66,29 @@
           <span id="ruleCount" class="rule-count"></span>
         </div>
       </div>
+
+      <!-- 规则精简 -->
+      <div class="minimize-box">
+        <div class="minimize-head">
+          <h2>✂️ 规则精简</h2>
+          <span class="muted">仅删除多余的完整规则行，不改写编辑器内容</span>
+        </div>
+        <p class="minimize-hint">
+          输入多条待保障请求路径（每行一条），沿用上方规则文本、步数上限与跟随重定向选项；
+          求出对每条路径的最终状态码、最终 URL、Location 与结束原因都保持不变的规则子集。
+        </p>
+        <textarea
+          id="minimizePathsInput"
+          class="minimize-paths"
+          spellcheck="false"
+          autocapitalize="off"
+          autocomplete="off"
+          placeholder="/old/about&#10;/api/v1/users/42&#10;/docs/guide/install.html"></textarea>
+        <div class="actions">
+          <button id="minimizeBtn" class="btn btn-primary" type="button">✂️ 开始精简</button>
+          <span id="minimizeCount" class="rule-count"></span>
+        </div>
+      </div>
     </section>
 
     <!-- 右：逐步执行轨迹 -->
@@ -100,6 +123,17 @@
       </div>
     </section>
   </main>
+
+  <!-- 规则精简结果弹窗 -->
+  <div id="minimizeModal" class="modal-overlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="minimizeModalTitle">
+      <div class="modal-head">
+        <h2 id="minimizeModalTitle">✂️ 规则精简结果</h2>
+        <button id="minimizeModalClose" class="modal-close" type="button" aria-label="关闭">✕</button>
+      </div>
+      <div id="minimizeModalBody" class="modal-body"></div>
+    </div>
+  </div>
 
   <div id="toast" class="toast" hidden></div>
 

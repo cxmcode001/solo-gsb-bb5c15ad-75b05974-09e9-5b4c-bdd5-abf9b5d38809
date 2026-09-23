@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from app.engine import parse_rules
 from app.examples import EXAMPLES
 from app.main import app
+from app.minimizer import MinimizeValidationError, minimize_rules
 from app.simulator import simulate
 
 client = TestClient(app)
@@ -277,6 +278,167 @@ for ex in EXAMPLES:
 loop_ex = next(e for e in EXAMPLES if e["id"] == "loop")
 data = post({"rules": loop_ex["rules"], "path": loop_ex["path"]}).json()
 check("循环示例触发 508", data["result"]["status"] == 508)
+
+# ---------------------------------------------------------------------------
+# 10. 规则精简：贪心删行
+# ---------------------------------------------------------------------------
+
+section("规则精简")
+
+SIG_KEYS = ("status", "final_url", "location", "finish_reason")
+
+
+def sig_of(result):
+    return tuple(result[k] for k in SIG_KEYS)
+
+
+# 基本：删除未被任何路径触及的规则，注释 / 空行 / 顺序原样保留
+min_src = (
+    "# 顶部注释\n"
+    "REDIRECT ^/old$ /new 301\n"
+    "\n"
+    "REWRITE ^/unused/.*$ /zz last\n"
+    "REWRITE ^/api/v1/(.*)$ /api/legacy/$1 next\n"
+    "# 结尾注释\n"
+)
+out = minimize_rules(min_src, ["/old", "/api/v1/x"])
+check("精简成功", out["ok"] is True)
+check("仅删除第 4 行", out["removed_lines"] == [4], out["removed_lines"])
+check("规则数 3 -> 2", out["removed_lines"] and
+      (out["original_rule_count"], out["minimized_rule_count"]) == (3, 2))
+check("注释与空行原样保留且顺序不变",
+      out["minimized_rules"] ==
+      "# 顶部注释\nREDIRECT ^/old$ /new 301\n\n"
+      "REWRITE ^/api/v1/(.*)$ /api/legacy/$1 next\n# 结尾注释\n",
+      repr(out["minimized_rules"]))
+check("各路径四要素不变", all(r["unchanged"] for r in out["results"]))
+check("结果条数等于路径数", len(out["results"]) == 2)
+check("结果含前后两份完整摘要",
+      set(out["results"][0]["before"]) >= set(SIG_KEYS)
+      and set(out["results"][0]["after"]) >= set(SIG_KEYS))
+
+# 重复规则：两条等价规则中只能删一条（按原行号从小到大，删掉第 1 条）
+dup_src = "REWRITE ^/x$ /y next\nREWRITE ^/x$ /y next\nREWRITE ^/z$ /w next\n"
+out = minimize_rules(dup_src, ["/x", "/z"])
+check("等价规则删 1 留 1", out["removed_lines"] == [1], out["removed_lines"])
+check("保留 2 条", out["minimized_rule_count"] == 2)
+# 精简结果再精简必须是不动点
+out2 = minimize_rules(out["minimized_rules"], ["/x", "/z"])
+check("二次精简为不动点", out2["removed_lines"] == [], out2["removed_lines"])
+
+# 跟随重定向选项影响可删性
+red_src = "REWRITE ^/b$ /c next\nREDIRECT ^/a$ /b 302\n"
+out_no = minimize_rules(red_src, ["/a"], follow_redirects=False)
+out_yes = minimize_rules(red_src, ["/a"], follow_redirects=True)
+check("不跟随时改写规则可删", out_no["removed_lines"] == [1], out_no["removed_lines"])
+check("跟随时改写规则必需", out_yes["removed_lines"] == [], out_yes["removed_lines"])
+check("跟随时最终到 /c",
+      out_yes["results"][0]["before"]["final_url"] == "/c"
+      and out_yes["results"][0]["before"]["hops"] == 1)
+
+# 循环（508）参与保障：组成循环的两条规则都不可删，无关规则可删
+loop_src = (
+    "REWRITE ^/a/(.*)$ /b/$1 last\n"
+    "REWRITE ^/b/(.*)$ /a/$1 last\n"
+    "REWRITE ^/unused/.*$ /zz next\n"
+)
+out = minimize_rules(loop_src, ["/a/x"])
+check("循环规则受保护", out["removed_lines"] == [3], out["removed_lines"])
+check("循环状态 508 不变",
+      out["results"][0]["before"]["status"] == 508
+      and out["results"][0]["unchanged"])
+
+# 超步数 509：两条规则都对最终状态有贡献时不可删
+out = minimize_rules(
+    "REWRITE ^/a/(.*)$ /b/$1 next\nREWRITE ^/b/(.*)$ /a/$1 last\n",
+    ["/a/x"], max_steps=2)
+check("超步数结果受保护", out["removed_lines"] == [], out["removed_lines"])
+check("终态为 509", out["results"][0]["before"]["status"] == 509)
+
+# 步数上限不同，可删集合不同：max_steps=1 时第 2 条规则永不执行
+out = minimize_rules(
+    "REWRITE ^/a/(.*)$ /b/$1 next\nREWRITE ^/b/(.*)$ /a/$1 last\n",
+    ["/a/x"], max_steps=1)
+check("步数上限影响精简", out["removed_lines"] == [2], out["removed_lines"])
+
+# 路径校验：空列表 / 缺斜杠 / 空白 / 去重
+def expect_validation(source, paths, **kw):
+    try:
+        minimize_rules(source, paths, **kw)
+        return False
+    except MinimizeValidationError:
+        return True
+
+
+check("空路径报错", expect_validation("REWRITE ^/a$ /b next", []))
+check("非斜杠路径报错", expect_validation("REWRITE ^/a$ /b next", ["a"]))
+check("空白路径报错", expect_validation("REWRITE ^/a$ /b next", ["/a b"]))
+out = minimize_rules("REWRITE ^/a$ /b next", ["/a", "/a", " /a "])
+check("路径去重", out["ok"] and out["paths"] == ["/a"], out.get("paths"))
+check("超过 50 条路径报错",
+      expect_validation("REWRITE ^/a$ /b next", [f"/p{i}" for i in range(51)]))
+
+# 规则语法错误：返回 ok=False 与行列定位，不抛异常
+out = minimize_rules("REWITE ^/a$ /b next\nREWRITE ^/a$ /b next", ["/a"])
+check("精简遇语法错误返回 ok=False", not out["ok"] and out["errors"][0]["line"] == 1)
+
+# 无规则 / 仅注释：无需删除，结果原样
+out = minimize_rules("# 只有注释\n", ["/x"])
+check("仅注释文本不动点", out["ok"] and out["removed_lines"] == []
+      and out["minimized_rules"] == "# 只有注释\n")
+
+# 对所有内置（非错误）示例：精简结果对示例路径必须四要素不变
+for ex in EXAMPLES:
+    if ex["id"] == "errors":
+        continue
+    o = minimize_rules(ex["rules"], [ex["path"]], follow_redirects=True)
+    check(f"示例[{ex['id']}] 精简保持结果", o["ok"]
+          and all(r["unchanged"] for r in o["results"]),
+          f"removed={o.get('removed_lines')}")
+
+section("精简 HTTP API")
+
+
+def post_min(body):
+    return client.post("/api/minimize", json=body)
+
+
+r = post_min({"rules": "REWRITE ^/a/(.*)$ /b/$1 next\nREWRITE ^/u$ /v next\n",
+              "paths": ["/a/x", "/a/x", "  /a/y  "]})
+check("POST /api/minimize 200", r.status_code == 200, r.text)
+d = r.json()
+check("路径去空白与去重", d["paths"] == ["/a/x", "/a/y"])
+check("删第 2 行", d["removed_lines"] == [2])
+check("返回精简文本与对照", d["minimized_rules"] and len(d["results"]) == 2
+      and d["results"][0]["unchanged"] is True)
+
+r = post_min({"rules": "REWRITE ^/a$ /b next", "paths": ["noslash"]})
+check("非法路径 422", r.status_code == 422 and "以 / 开头" in r.json()["detail"][0]["msg"])
+
+r = post_min({"rules": "x", "paths": []})
+check("空路径 422", r.status_code == 422)
+
+r = post_min({"rules": "", "paths": ["/a"], "max_steps": 9999})
+check("步数越界 422", r.status_code == 422)
+
+r = post_min({"rules": "REWITE x y next", "paths": ["/a"]})
+check("规则错误 200 且 ok=False",
+      r.status_code == 200 and r.json()["ok"] is False
+      and r.json()["errors"][0]["line"] == 1)
+
+r = post_min({"rules": "", "paths": [f"/p{i}" for i in range(51)]})
+check("路径超 50 条 422", r.status_code == 422)
+
+r = client.get("/")
+html = r.text
+check("首页含精简按钮", 'id="minimizeBtn"' in html)
+check("首页含多路径输入框", 'id="minimizePathsInput"' in html)
+check("首页含精简结果弹窗", 'id="minimizeModal"' in html)
+check("精简 API 已注册",
+      "/api/minimize" in {route.path for route in app.routes})
+
+r = client.get("/static/app.js")
+check("app.js 含精简逻辑", r.status_code == 200 and "/api/minimize" in r.text)
 
 print(f"\n{'='*50}")
 print(f"通过 {PASS}，失败 {FAIL}")
