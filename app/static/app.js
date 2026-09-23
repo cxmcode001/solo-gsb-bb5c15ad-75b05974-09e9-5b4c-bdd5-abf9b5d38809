@@ -33,7 +33,20 @@ const locationValue = $("locationValue");
 const traceEl = $("trace");
 const toastEl = $("toast");
 
+const minimizePathsInput = $("minimizePathsInput");
+const minimizeBtn = $("minimizeBtn");
+const minimizeResult = $("minimizeResult");
+const minimizeSummary = $("minimizeSummary");
+const minimizeIncomplete = $("minimizeIncomplete");
+const removedLines = $("removedLines");
+const minimizedRules = $("minimizedRules");
+const minimizePathsTable = $("minimizePathsTable");
+const copyMinimizedBtn = $("copyMinimizedBtn");
+const applyMinimizedBtn = $("applyMinimizedBtn");
+const minimizeCloseBtn = $("minimizeCloseBtn");
+
 let lastResponse = null;
+let lastMinimize = null;
 let examples = [];
 let errorLineSet = new Set();
 
@@ -101,6 +114,7 @@ editor.addEventListener("input", () => {
   errorLineSet = new Set();
   editor.classList.remove("has-error-line");
   errorList.hidden = true;
+  hideMinimizeResult(); // 规则已变更，旧的精简结果不再适用
   renderGutter();
 });
 
@@ -150,6 +164,7 @@ loadExampleBtn.addEventListener("click", () => {
   errorLineSet = new Set();
   editor.classList.remove("has-error-line");
   errorList.hidden = true;
+  hideMinimizeResult();
   renderGutter();
   toast(`已载入示例：${ex.name}`);
 });
@@ -456,6 +471,7 @@ function applySharedState(state) {
   errorLineSet = new Set();
   editor.classList.remove("has-error-line");
   errorList.hidden = true;
+  hideMinimizeResult();
   renderGutter();
   resetResultPanel();
 }
@@ -596,6 +612,206 @@ document.addEventListener("keydown", (e) => {
     runDebug();
   }
 });
+
+// ---------------------------------------------------------------------------
+// 规则精简
+// ---------------------------------------------------------------------------
+
+function hideMinimizeResult() {
+  lastMinimize = null;
+  minimizeResult.hidden = true;
+}
+
+// 单个最终结果的紧凑展示：状态徽标 + 最终 URL + Location + 结束原因
+function renderResultCell(container, result) {
+  const statusLine = el("div", "mp-status");
+  statusLine.appendChild(
+    el("span", `status-badge badge-small ${statusClass(result.status)}`, `HTTP ${result.status}`)
+  );
+  statusLine.appendChild(el("span", "mp-url", result.final_url || "—"));
+  container.appendChild(statusLine);
+
+  if (result.location) {
+    const loc = el("div", "mp-loc");
+    loc.appendChild(el("span", "mp-label", "Location: "));
+    loc.appendChild(el("span", "", result.location));
+    container.appendChild(loc);
+  }
+
+  const meta = `${REASON_TEXT[result.finish_reason] || result.finish_reason} · ${result.steps} 步` +
+    (result.hops ? ` · ${result.hops} 跳` : "");
+  container.appendChild(el("div", "mp-reason muted", meta));
+}
+
+function renderMinimizePaths(paths) {
+  minimizePathsTable.innerHTML = "";
+  const header = el("div", "mp-row mp-head");
+  ["待保障路径", "精简前", "精简后", "一致"].forEach((text, i) => {
+    header.appendChild(el("span", i === 3 ? "mp-cell mp-check" : "mp-cell", text));
+  });
+  minimizePathsTable.appendChild(header);
+
+  paths.forEach((p) => {
+    const row = el("div", "mp-row");
+    row.appendChild(el("span", "mp-cell mp-path", p.path));
+    const beforeCell = el("span", "mp-cell");
+    renderResultCell(beforeCell, p.before);
+    row.appendChild(beforeCell);
+    const afterCell = el("span", "mp-cell");
+    renderResultCell(afterCell, p.after);
+    row.appendChild(afterCell);
+    row.appendChild(
+      el("span", `mp-cell mp-check ${p.unchanged ? "ok" : "bad"}`, p.unchanged ? "✓" : "✗")
+    );
+    minimizePathsTable.appendChild(row);
+  });
+}
+
+function renderMinimizeResult(data) {
+  lastMinimize = data;
+
+  const removed = data.removed_lines;
+  minimizeSummary.textContent =
+    `有效规则 ${data.rule_count_before} 条 → 保留 ${data.rule_count_after} 条，` +
+    `删除 ${removed.length} 行（扫描 ${data.rounds} 轮）`;
+  minimizeIncomplete.hidden = data.completed;
+
+  // 删除行号 chips：点击可在编辑器中定位对应行
+  removedLines.innerHTML = "";
+  if (removed.length) {
+    removed.forEach((ln) => {
+      const chip = el("button", "removed-chip", `第 ${ln} 行`);
+      chip.type = "button";
+      chip.title = "点击在编辑器中定位该行";
+      chip.addEventListener("click", () => jumpToError({ line: ln, col: 1, length: 1 }));
+      removedLines.appendChild(chip);
+    });
+  } else {
+    removedLines.appendChild(
+      el("span", "removed-none", "无 —— 当前规则对这批路径已无法进一步精简")
+    );
+  }
+
+  minimizedRules.textContent = data.minimized_rules;
+  renderMinimizePaths(data.paths);
+
+  minimizeResult.hidden = false;
+  // 右侧上下文切换到精简结果；调试轨迹待下次「运行调试」再展示
+  summary.hidden = true;
+  traceEl.innerHTML = "";
+  const ph = el("div", "placeholder");
+  ph.appendChild(el("p", "", "✂ 精简完成，结果见上方"));
+  ph.appendChild(
+    el("p", "muted", "编辑器内容未被修改；可复制精简规则，或「载入编辑器」后点击「运行调试」逐步验证")
+  );
+  traceEl.appendChild(ph);
+}
+
+async function runMinimize() {
+  const paths = minimizePathsInput.value
+    .split("\n")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+  if (!paths.length) {
+    toast("请输入至少一条待保障路径", true);
+    minimizePathsInput.focus();
+    return;
+  }
+  for (const p of paths) {
+    if (!p.startsWith("/") || /\s/.test(p)) {
+      toast(`待保障路径「${p}」必须以 / 开头且不含空白字符`, true);
+      minimizePathsInput.focus();
+      return;
+    }
+  }
+  const maxSteps = parseInt(maxStepsInput.value, 10);
+  if (!Number.isFinite(maxSteps) || maxSteps < 1 || maxSteps > 500) {
+    toast("步数上限需为 1–500 之间的整数", true);
+    maxStepsInput.focus();
+    return;
+  }
+
+  const body = {
+    rules: editor.value,
+    paths,
+    max_steps: maxSteps,
+    follow_redirects: followRedirectsInput.checked,
+  };
+
+  minimizeBtn.disabled = true;
+  minimizeBtn.textContent = "⏳ 精简中…";
+
+  try {
+    const res = await fetch("/api/minimize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    if (res.status === 422) {
+      const payload = await res.json();
+      const msg =
+        payload.detail && payload.detail[0]
+          ? payload.detail[0].msg
+          : "请求参数不合法";
+      toast(msg, true);
+      return;
+    }
+
+    const data = await res.json();
+
+    if (!data.ok) {
+      // 规则语法错误：复用错误定位高亮；其它错误仅提示。均不触碰编辑器内容
+      if (data.errors && data.errors.length) {
+        renderErrors(data.errors);
+        toast(`规则存在 ${data.errors.length} 个语法错误，无法精简`, true);
+      } else {
+        toast(data.message || "精简失败", true);
+      }
+      return;
+    }
+
+    errorList.hidden = true;
+    errorLineSet = new Set();
+    editor.classList.remove("has-error-line");
+    renderGutter();
+    renderMinimizeResult(data);
+    toast(
+      data.removed_lines.length
+        ? `精简完成：删除 ${data.removed_lines.length} 行规则`
+        : "精简完成：没有可删除的规则行"
+    );
+  } catch (err) {
+    toast(`网络错误，精简服务不可达：${String(err)}`, true);
+  } finally {
+    minimizeBtn.disabled = false;
+    minimizeBtn.textContent = "✂ 精简规则";
+  }
+}
+
+minimizeBtn.addEventListener("click", runMinimize);
+
+copyMinimizedBtn.addEventListener("click", () => {
+  if (!lastMinimize) return;
+  copyText(lastMinimize.minimized_rules, "已复制精简后的规则");
+});
+
+applyMinimizedBtn.addEventListener("click", () => {
+  if (!lastMinimize) return;
+  if (!window.confirm("用精简后的规则替换当前编辑器内容？\n原规则文本将被覆盖，建议先复制备份。")) {
+    return;
+  }
+  editor.value = lastMinimize.minimized_rules;
+  errorLineSet = new Set();
+  editor.classList.remove("has-error-line");
+  errorList.hidden = true;
+  hideMinimizeResult();
+  renderGutter();
+  toast("已载入精简后的规则，可点击「运行调试」验证");
+});
+
+minimizeCloseBtn.addEventListener("click", hideMinimizeResult);
 
 // ---------------------------------------------------------------------------
 // 初始化

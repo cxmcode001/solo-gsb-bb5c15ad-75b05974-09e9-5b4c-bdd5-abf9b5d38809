@@ -84,6 +84,11 @@ body {
   overflow: hidden;
 }
 
+/* 左侧面板内容较多（编辑器 + 请求区 + 精简区），矮视口下允许整体滚动 */
+.panel-left {
+  overflow-y: auto;
+}
+
 .panel-head {
   display: flex;
   align-items: center;
@@ -675,6 +680,255 @@ body {
 
 .step.special.limit .special-title {
   color: var(--amber);
+}
+
+/* ---------- 规则精简 ---------- */
+
+.minimize-box {
+  flex: 0 0 auto;
+  padding: 12px 16px 16px;
+  border-top: 1px solid var(--border);
+  background: #fcfdff;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.minimize-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.minimize-title h3 {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 700;
+}
+
+.field textarea {
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text);
+  background: #fff;
+  resize: vertical;
+  min-height: 54px;
+}
+
+.field textarea:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(48, 86, 211, 0.14);
+}
+
+.btn-small {
+  padding: 6px 12px;
+  font-size: 12.5px;
+}
+
+.minimize-result {
+  flex: 0 0 auto;
+  max-height: 58%;
+  overflow: auto;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  background: #f8fbff;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.minimize-result[hidden] {
+  display: none;
+}
+
+.minimize-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.minimize-head h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.minimize-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.minimize-close {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 6px;
+  line-height: 1.4;
+}
+
+.minimize-close:hover {
+  background: rgba(48, 86, 211, 0.1);
+}
+
+.minimize-summary {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--slate);
+}
+
+.minimize-incomplete {
+  padding: 8px 12px;
+  background: var(--amber-soft);
+  border: 1px solid #f0dcaf;
+  border-radius: 8px;
+  color: #7a5210;
+  font-size: 12.5px;
+}
+
+.minimize-removed,
+.minimize-rules-wrap,
+.minimize-paths {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.removed-lines {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.removed-chip {
+  border: 1px solid #f2c4c0;
+  background: var(--red-soft);
+  color: var(--red);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.removed-chip:hover {
+  background: #f9dcd8;
+}
+
+.removed-none {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.minimized-rules {
+  margin: 0;
+  padding: 10px 12px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre;
+  overflow: auto;
+  max-height: 180px;
+}
+
+.minimize-paths-table {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.mp-row {
+  display: grid;
+  grid-template-columns: minmax(80px, 1fr) minmax(0, 2fr) minmax(0, 2fr) auto;
+  gap: 10px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  align-items: start;
+  font-size: 12.5px;
+}
+
+.mp-row:first-child {
+  border-top: 0;
+}
+
+.mp-row.mp-head {
+  background: var(--slate-soft);
+  font-weight: 700;
+  color: var(--slate);
+  font-size: 12px;
+  padding: 6px 12px;
+}
+
+.mp-cell {
+  min-width: 0;
+  word-break: break-all;
+}
+
+.mp-path {
+  font-family: var(--mono);
+  font-weight: 600;
+}
+
+.mp-check {
+  font-weight: 700;
+  text-align: center;
+}
+
+.mp-check.ok {
+  color: var(--green);
+}
+
+.mp-check.bad {
+  color: var(--red);
+}
+
+.mp-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.badge-small {
+  font-size: 11.5px;
+  padding: 2px 8px;
+}
+
+.mp-url {
+  font-family: var(--mono);
+  word-break: break-all;
+}
+
+.mp-loc {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--slate);
+  margin-top: 2px;
+}
+
+.mp-label {
+  color: var(--muted);
+}
+
+.mp-reason {
+  margin-top: 2px;
 }
 
 /* ---------- Toast ---------- */

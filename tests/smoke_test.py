@@ -278,6 +278,164 @@ loop_ex = next(e for e in EXAMPLES if e["id"] == "loop")
 data = post({"rules": loop_ex["rules"], "path": loop_ex["path"]}).json()
 check("循环示例触发 508", data["result"]["status"] == 508)
 
+# ---------------------------------------------------------------------------
+# 10. 规则精简
+# ---------------------------------------------------------------------------
+
+section("规则精简")
+
+
+def minimize(body):
+    return client.post("/api/minimize", json=body)
+
+
+def result_key_of(sim):
+    r = sim["result"]
+    return (r["status"], r["final_url"], r["location"], r["finish_reason"])
+
+
+def verify_1_minimal(minimized_src, paths, max_steps=100, follow=False):
+    """精简结果中任一剩余规则被单独删除，都会改变至少一条路径的结果。"""
+    base_rules, errs = parse_rules(minimized_src)
+    assert not errs
+    baseline = {}
+    for p in paths:
+        baseline[p] = result_key_of(
+            simulate(base_rules, p, max_steps=max_steps, follow_redirects=follow)
+        )
+    lines = minimized_src.splitlines()
+    for rule in base_rules:
+        trial = "\n".join(ln for i, ln in enumerate(lines, 1) if i != rule.line)
+        t_rules, _ = parse_rules(trial)
+        changed = any(
+            result_key_of(
+                simulate(t_rules, p, max_steps=max_steps, follow_redirects=follow)
+            )
+            != baseline[p]
+            for p in paths
+        )
+        if not changed:
+            return rule.line
+    return None
+
+
+# 基本精简：冗余行删除、注释与空行按原文保留
+src = (
+    "# 头部注释：API 版本迁移\n"
+    "REWRITE ^/api/v1/(.*)$ /api/legacy/$1 next\n"
+    "\n"
+    "# 冗余规则：目标路径不会命中\n"
+    "REWRITE ^/unused/(.*)$ /x/$1 next\n"
+    "REDIRECT ^/old$ /new 301\n"
+    "# 尾部注释\n"
+)
+r = minimize({"rules": src, "paths": ["/api/v1/users"], "max_steps": 100,
+              "follow_redirects": False})
+check("精简 POST 200", r.status_code == 200, r.text)
+data = r.json()
+check("精简 ok", data["ok"] is True, data)
+check("删除第 5、6 行（原行号）", data["removed_lines"] == [5, 6], data["removed_lines"])
+check("保留第 2 行", data["kept_lines"] == [2], data["kept_lines"])
+check("规则数 3→1", data["rule_count_before"] == 3 and data["rule_count_after"] == 1)
+check("精简完成标记", data["completed"] is True)
+expected = (
+    "# 头部注释：API 版本迁移\n"
+    "REWRITE ^/api/v1/(.*)$ /api/legacy/$1 next\n"
+    "\n"
+    "# 冗余规则：目标路径不会命中\n"
+    "# 尾部注释"
+)
+check("注释与空行按原文保留", data["minimized_rules"] == expected,
+      repr(data["minimized_rules"]))
+check("路径前后结果一致", all(p["unchanged"] for p in data["paths"]))
+p0 = data["paths"][0]
+check("before 结果正确", p0["before"]["final_url"] == "/api/legacy/users"
+      and p0["before"]["status"] == 200, p0)
+check("after 四元组一致", p0["after"]["final_url"] == "/api/legacy/users"
+      and p0["after"]["status"] == 200
+      and p0["after"]["finish_reason"] == "fallthrough")
+re_rules, re_errs = parse_rules(data["minimized_rules"])
+check("精简结果可重新解析", not re_errs and len(re_rules) == data["rule_count_after"])
+bad = verify_1_minimal(data["minimized_rules"], ["/api/v1/users"])
+check("结果达到 1-minimal", bad is None, f"第 {bad} 行仍可删")
+
+# 确定性：同一输入两次运行结果相同
+d1 = minimize({"rules": src, "paths": ["/api/v1/users"]}).json()
+d2 = minimize({"rules": src, "paths": ["/api/v1/users"]}).json()
+check("删除行号确定", d1["removed_lines"] == d2["removed_lines"])
+check("精简文本确定", d1["minimized_rules"] == d2["minimized_rules"])
+
+# 多路径：各自依赖的规则都保留，仅删与所有路径无关的规则
+src2 = (
+    "REWRITE ^/a/(.*)$ /x/$1 next\n"
+    "REWRITE ^/b/(.*)$ /y/$1 next\n"
+    "REWRITE ^/c/(.*)$ /z/$1 next\n"
+)
+data = minimize({"rules": src2, "paths": ["/a/1", "/b/2"]}).json()
+check("仅删除与路径无关的第 3 行", data["removed_lines"] == [3], data["removed_lines"])
+check("两条路径均一致", all(p["unchanged"] for p in data["paths"]))
+bad = verify_1_minimal(data["minimized_rules"], ["/a/1", "/b/2"])
+check("多路径结果 1-minimal", bad is None, f"第 {bad} 行仍可删")
+
+# 跟随重定向选项沿用：重定向链上的规则都不可删
+src3 = (
+    "REDIRECT ^/promo$ /promo/spring 302\n"
+    "REWRITE ^/promo/spring$ /pages/promo next\n"
+    "REWRITE ^/other$ /else next\n"
+)
+data = minimize({"rules": src3, "paths": ["/promo"], "follow_redirects": True}).json()
+check("重定向链规则保留", data["removed_lines"] == [3], data["removed_lines"])
+p = data["paths"][0]
+check("跟随结果 200 /pages/promo", p["before"]["final_url"] == "/pages/promo"
+      and p["before"]["status"] == 200 and p["before"]["hops"] == 1, p)
+check("after 与 before 一致", p["unchanged"] and p["after"]["hops"] == 1)
+
+# 循环路径：508 与结束原因必须保持，循环规则不可删
+src4 = (
+    "REWRITE ^/a/(.*)$ /b/$1 last\n"
+    "REWRITE ^/b/(.*)$ /a/$1 last\n"
+    "REWRITE ^/unused$ /x next\n"
+)
+data = minimize({"rules": src4, "paths": ["/a/x"]}).json()
+check("循环规则全部保留", data["removed_lines"] == [3], data["removed_lines"])
+check("508 与 loop 保持", data["paths"][0]["after"]["status"] == 508
+      and data["paths"][0]["after"]["finish_reason"] == "loop")
+
+# 全部规则均可删（目标路径不命中任何规则）
+data = minimize({"rules": "REWRITE ^/x$ /y next\nREDIRECT ^/z$ /w 301\n",
+                 "paths": ["/unrelated"]}).json()
+check("全部规则可删", data["removed_lines"] == [1, 2] and data["rule_count_after"] == 0)
+check("精简后为空文本", data["minimized_rules"] == "")
+
+# 无有效规则（全注释）：ok 且原文保留
+data = minimize({"rules": "# 只有注释\n\n", "paths": ["/a"]}).json()
+check("无有效规则 ok", data["ok"] is True and data["removed_lines"] == [])
+check("无规则时原文保留", data["minimized_rules"] == "# 只有注释\n")
+
+# 重复路径去重
+data = minimize({"rules": "REWRITE ^/a$ /b next\n", "paths": ["/a", "/a", "/c"]}).json()
+check("重复路径去重", len(data["paths"]) == 2, len(data["paths"]))
+
+# 规则语法错误：ok=False 且带行列定位
+r = minimize({"rules": "REWRITE ^/([0-9 /x next", "paths": ["/a"]})
+data = r.json()
+check("语法错误 200 + ok=False", r.status_code == 200 and data["ok"] is False)
+check("错误带行列定位", data["errors"][0]["line"] >= 1 and data["errors"][0]["col"] >= 1)
+
+# 路径与参数校验
+check("空路径列表 422", minimize({"rules": "", "paths": []}).status_code == 422)
+check("路径缺斜杠 422", minimize({"rules": "", "paths": ["no-slash"]}).status_code == 422)
+check("路径含空格 422", minimize({"rules": "", "paths": ["/a b"]}).status_code == 422)
+check("路径超 20 条 422",
+      minimize({"rules": "", "paths": [f"/p{i}" for i in range(21)]}).status_code == 422)
+check("步数越界 422",
+      minimize({"rules": "", "paths": ["/a"], "max_steps": 0}).status_code == 422)
+
+# 有效规则数超限：明确拒绝
+many = "\n".join(f"REWRITE ^/r{i}$ /x next" for i in range(301))
+data = minimize({"rules": many, "paths": ["/a"]}).json()
+check("规则过多被拒绝", data["ok"] is False and "过多" in data["message"], data.get("message"))
+
 print(f"\n{'='*50}")
 print(f"通过 {PASS}，失败 {FAIL}")
 sys.exit(1 if FAIL else 0)

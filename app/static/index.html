@@ -66,12 +66,60 @@
           <span id="ruleCount" class="rule-count"></span>
         </div>
       </div>
+
+      <div class="minimize-box">
+        <div class="minimize-title">
+          <h3>✂ 规则精简</h3>
+          <span class="muted">删除对下列路径最终结果无影响的冗余规则行</span>
+        </div>
+        <label class="field">
+          <span class="field-label">待保障路径（每行一条，沿用上方步数上限与重定向选项）</span>
+          <textarea
+            id="minimizePathsInput"
+            rows="3"
+            spellcheck="false"
+            autocapitalize="off"
+            autocomplete="off"
+            placeholder="/old/about&#10;/api/v1/users"></textarea>
+        </label>
+        <div class="actions">
+          <button id="minimizeBtn" class="btn btn-secondary" type="button">✂ 精简规则</button>
+          <span class="muted">保持每条路径的状态码、最终 URL、Location 与结束原因不变</span>
+        </div>
+      </div>
     </section>
 
     <!-- 右：逐步执行轨迹 -->
     <section class="panel panel-right">
       <div class="panel-head">
         <h2>执行轨迹</h2>
+      </div>
+
+      <div id="minimizeResult" class="minimize-result" hidden>
+        <div class="minimize-head">
+          <h3>✂ 精简结果</h3>
+          <div class="minimize-head-actions">
+            <button id="copyMinimizedBtn" class="btn btn-secondary btn-small" type="button">📋 复制精简规则</button>
+            <button id="applyMinimizedBtn" class="btn btn-secondary btn-small" type="button">⤵ 载入编辑器</button>
+            <button id="minimizeCloseBtn" class="minimize-close" type="button" aria-label="关闭精简结果">✕</button>
+          </div>
+        </div>
+        <div id="minimizeSummary" class="minimize-summary"></div>
+        <div id="minimizeIncomplete" class="minimize-incomplete" hidden>
+          ⚠️ 计算预算已耗尽，提前停止：以下结果已验证与原始规则一致，但可能仍可进一步精简。
+        </div>
+        <div class="minimize-removed">
+          <span class="summary-label">删除的规则行（原行号）</span>
+          <div id="removedLines" class="removed-lines"></div>
+        </div>
+        <div class="minimize-rules-wrap">
+          <span class="summary-label">精简后的规则（注释与空行按原文保留）</span>
+          <pre id="minimizedRules" class="minimized-rules"></pre>
+        </div>
+        <div class="minimize-paths">
+          <span class="summary-label">各路径精简前后结果</span>
+          <div id="minimizePathsTable" class="minimize-paths-table"></div>
+        </div>
       </div>
 
       <div id="summary" class="summary" hidden>
